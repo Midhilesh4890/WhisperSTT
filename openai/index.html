@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenAI Whisper Real-Time STT</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+
+        .status-section {
+            margin: 20px 0;
+        }
+
+        #status {
+            font-weight: bold;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            margin: 15px 0;
+            transition: all 0.3s ease;
+        }
+
+        .connected {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+        }
+
+        .disconnected {
+            background: linear-gradient(45deg, #f44336, #da190b);
+            color: white;
+        }
+
+        .connecting {
+            background: linear-gradient(45deg, #ff9800, #f57c00);
+            color: white;
+        }
+
+        .controls {
+            text-align: center;
+            margin: 30px 0;
+        }
+
+        button {
+            padding: 15px 30px;
+            margin: 10px;
+            font-size: 18px;
+            cursor: pointer;
+            border: none;
+            border-radius: 50px;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #startBtn {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4);
+        }
+
+        #startBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(76, 175, 80, 0.6);
+        }
+
+        #stopBtn {
+            background: linear-gradient(45deg, #f44336, #da190b);
+            color: white;
+            box-shadow: 0 4px 15px rgba(244, 67, 54, 0.4);
+        }
+
+        #stopBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(244, 67, 54, 0.6);
+        }
+
+        #clearBtn {
+            background: linear-gradient(45deg, #607D8B, #455A64);
+            color: white;
+            padding: 10px 20px;
+            font-size: 14px;
+            box-shadow: 0 4px 15px rgba(96, 125, 139, 0.4);
+        }
+
+        #clearBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(96, 125, 139, 0.6);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: space-between;
+            margin: 20px 0;
+            font-size: 16px;
+            color: #555;
+            background: rgba(0, 0, 0, 0.05);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        .stat-item {
+            font-weight: 600;
+        }
+
+        .transcription-section {
+            margin-top: 30px;
+        }
+
+        .transcription-section h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }
+
+        #output {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 15px;
+            min-height: 250px;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            border: 2px solid #e9ecef;
+            max-height: 400px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.6;
+            color: #333;
+        }
+
+        .timestamp {
+            color: #666;
+            font-weight: bold;
+        }
+
+        .transcription-text {
+            color: #333;
+            margin-left: 10px;
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        .error-message {
+            color: #f44336;
+            font-weight: bold;
+        }
+
+        .success-message {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>OpenAI Whisper STT</h1>
+
+        <div class="status-section">
+            <div id="status" class="disconnected">Status: Ready to Connect</div>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn">🎙️ Start Recording</button>
+            <button id="stopBtn" disabled>⏹️ Stop Recording</button>
+            <button id="clearBtn">🗑️ Clear</button>
+        </div>
+
+
+
+        <div class="transcription-section">
+            <h2>📝 Transcription</h2>
+            <div id="output">Click "Start Recording" to begin transcription...</div>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        let audioContext;
+        let source;
+        let processor;
+        let isRecording = false;
+        let chunkCount = 0;
+        let startTime;
+        let recordingTimer;
+
+        // DOM elements
+        const startBtn = document.getElementById("startBtn");
+        const stopBtn = document.getElementById("stopBtn");
+        const clearBtn = document.getElementById("clearBtn");
+        const output = document.getElementById("output");
+        const status = document.getElementById("status");
+
+        function updateStatus(message, className) {
+            status.textContent = `Status: ${message}`;
+            status.className = className;
+        }
+
+        function appendTranscription(text) {
+            const currentTime = new Date().toLocaleTimeString();
+            const timestamp = `[${currentTime}]`;
+
+            // Clear initial message if it's the first transcription
+            if (output.textContent.includes("Click \"Start Recording\"")) {
+                output.textContent = "";
+            }
+
+            output.textContent += `${timestamp} ${text}\n`;
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function updateRecordingTime() {
+            // Removed - no longer needed
+        }
+
+        function resetCounters() {
+            // Removed - no longer needed
+        }
+
+        startBtn.onclick = async () => {
+            try {
+                updateStatus("Connecting...", "connecting");
+
+                // Start recording timer (removed)
+
+                // Connect to WebSocket
+                console.log("Connecting to WebSocket...");
+                ws = new WebSocket("ws://localhost:8000/ws/transcribe");
+
+                ws.onopen = () => {
+                    console.log("WebSocket connected");
+                    updateStatus("Connected & Recording", "connected");
+                };
+
+                ws.onmessage = (event) => {
+                    console.log("Received message:", event.data);
+
+                    if (event.data && event.data.trim()) {
+                        if (event.data.startsWith("Error")) {
+                            console.error("Server error:", event.data);
+                            appendTranscription(`❌ ${event.data}`);
+                        } else if (!event.data.includes("[No speech detected]")) {
+                            appendTranscription(event.data);
+                        }
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    console.error("WebSocket error:", error);
+                    updateStatus("Connection Error", "disconnected");
+                    appendTranscription("❌ WebSocket connection error. Check if server is running.");
+                };
+
+                ws.onclose = (event) => {
+                    console.log("WebSocket closed:", event);
+                    updateStatus("Disconnected", "disconnected");
+                };
+
+                // Get microphone access
+                console.log("Requesting microphone access...");
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                console.log("Microphone access granted");
+
+                // Set up Web Audio API
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000
+                });
+
+                source = audioContext.createMediaStreamSource(stream);
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                let audioBuffer = [];
+                const BUFFER_SIZE = 16000 * 3; // 3 seconds of audio
+
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording) return;
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    audioBuffer.push(...inputData);
+
+                    // Send audio when buffer is full
+                    if (audioBuffer.length >= BUFFER_SIZE) {
+                        const audioData = new Float32Array(audioBuffer);
+
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            // Convert Float32Array to ArrayBuffer
+                            const buffer = new ArrayBuffer(audioData.length * 4);
+                            const view = new DataView(buffer);
+
+                            for (let i = 0; i < audioData.length; i++) {
+                                view.setFloat32(i * 4, audioData[i], true); // little endian
+                            }
+
+                            ws.send(buffer);
+                            console.log(`Sent audio chunk ${++chunkCount}`);
+                        }
+
+                        // Clear buffer
+                        audioBuffer = [];
+                    }
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                isRecording = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+
+                appendTranscription("🎙️ Listening for speech...");
+
+            } catch (error) {
+                console.error("Error starting recording:", error);
+                updateStatus("Failed to Start", "disconnected");
+
+                let errorMessage = "Failed to start recording. ";
+
+                if (error.name === 'NotAllowedError') {
+                    errorMessage += "Microphone access denied. Please allow microphone access and try again.";
+                } else if (error.name === 'NotFoundError') {
+                    errorMessage += "No microphone found. Please connect a microphone and try again.";
+                } else {
+                    errorMessage += "Check console for details.";
+                }
+
+                alert(errorMessage);
+
+                // Clear any timers or counters if needed
+            }
+        };
+
+        stopBtn.onclick = () => {
+            console.log("Stopping recording...");
+            isRecording = false;
+
+            // Clean up audio processing
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+
+            if (source) {
+                source.disconnect();
+                source = null;
+            }
+
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            // Close WebSocket
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            // Update UI
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            updateStatus("Stopped", "disconnected");
+
+            appendTranscription("\n📊 Recording session ended");
+        };
+
+        clearBtn.onclick = () => {
+            output.textContent = "Click \"Start Recording\" to begin transcription...";
+        };
+
+        // Clean up on page unload
+        window.addEventListener('beforeunload', () => {
+            if (isRecording) {
+                stopBtn.click();
+            }
+        });
+
+        // Check if server is running
+        fetch('/health')
+            .then(response => response.json())
+            .then(data => {
+                console.log('Server health check:', data);
+            })
+            .catch(error => {
+                console.log('Server health check failed:', error);
+            });
+    </script>
+</body>
+
+</html>

@@ -11,3 +11,4 @@ fastapi
 uvicorn
 openai 
 pyaudio
+python-dotenv
