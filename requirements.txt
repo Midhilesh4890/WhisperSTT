@@ -1,0 +1,8 @@
+git+https://github.com/openai/whisper.git 
+torch 
+sounddevice 
+scipy
+streamlit 
+streamlit-webrtc 
+soundfile 
+numpy

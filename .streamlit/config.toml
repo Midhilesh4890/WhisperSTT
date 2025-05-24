@@ -1,0 +1,8 @@
+[server]
+fileWatcherType = "none"
+
+[global]
+developmentMode = false
+
+[runner]
+fastReruns = false
