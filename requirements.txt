@@ -6,3 +6,8 @@ streamlit
 streamlit-webrtc 
 soundfile 
 numpy
+websockets
+fastapi
+uvicorn
+openai 
+pyaudio

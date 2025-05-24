@@ -1,9 +1,13 @@
 import soundfile as sf
 import numpy as np
-import streamlit as st
-import os
-import sys
 import tempfile
+import sys
+import os
+import streamlit as st
+
+# MUST be first Streamlit command
+st.set_page_config(page_title="Whisper STT", layout="centered")
+
 
 # Fix PyTorch + Streamlit compatibility
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -20,14 +24,12 @@ except ImportError as e:
 
 # Try to import webrtc with fallback
 try:
-    from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
+    from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode, RTCConfiguration, RTCIceServer
     WEBRTC_AVAILABLE = True
 except ImportError:
     WEBRTC_AVAILABLE = False
     st.warning("streamlit-webrtc not available. Using file upload mode only.")
-
-# Streamlit UI setup
-st.set_page_config(page_title="Whisper STT", layout="centered")
+# App title
 st.title("🎤 Whisper Speech-to-Text Demo")
 
 if not WHISPER_AVAILABLE:
@@ -52,14 +54,13 @@ if model is None:
     st.error("Failed to load Whisper model. Please check your installation.")
     st.stop()
 
-# Initialize session state for audio data
+# Initialize session state
 if 'audio_data' not in st.session_state:
     st.session_state.audio_data = None
-if 'recording_complete' not in st.session_state:
-    st.session_state.recording_complete = False
 
 # Choose mode
-mode = st.radio("Choose input method:", ["File Upload", "Microphone (WebRTC)"])
+mode = st.radio("Choose input method:", [
+                "File Upload", "Microphone (WebRTC)", "Simple Audio Recorder"])
 
 if mode == "File Upload":
     st.header("📁 Upload Audio File")
@@ -99,131 +100,253 @@ if mode == "File Upload":
                         pass
 
 elif mode == "Microphone (WebRTC)" and WEBRTC_AVAILABLE:
-    st.header("🎤 Real-time Microphone")
+    st.header("🎤 WebRTC Microphone")
+
+    # Configure STUN servers for better connectivity
+    rtc_configuration = RTCConfiguration({
+        "iceServers": [
+            RTCIceServer({"urls": ["stun:stun.l.google.com:19302"]}),
+            RTCIceServer({"urls": ["stun:stun1.l.google.com:19302"]}),
+            RTCIceServer({"urls": ["stun:stun2.l.google.com:19302"]}),
+        ]
+    })
 
     class AudioProcessor(AudioProcessorBase):
         def __init__(self) -> None:
             self.recorded_frames = []
             self.is_recording = False
 
-        def recv_audio(self, frame):
+        def recv_queued(self, frames):
+            # Process multiple frames at once (more efficient)
             if self.is_recording:
-                self.recorded_frames.append(frame.to_ndarray().flatten())
-            return frame
+                for frame in frames:
+                    self.recorded_frames.append(frame.to_ndarray().flatten())
+            return frames
 
         def start_recording(self):
             self.is_recording = True
             self.recorded_frames = []
+            st.session_state.recording_active = True
+            st.session_state.has_audio_data = False
 
         def stop_recording(self):
             self.is_recording = False
+            st.session_state.recording_active = False
+            if self.recorded_frames:
+                st.session_state.audio_frames = self.recorded_frames.copy()
+                st.session_state.has_audio_data = True
             return self.recorded_frames
+
+    # Initialize session state
+    if 'recording_active' not in st.session_state:
+        st.session_state.recording_active = False
+    if 'has_audio_data' not in st.session_state:
+        st.session_state.has_audio_data = False
+    if 'audio_frames' not in st.session_state:
+        st.session_state.audio_frames = []
 
     try:
         ctx = webrtc_streamer(
-            key="whisper-stt",
+            key="whisper-stt-stun",
             mode=WebRtcMode.SENDONLY,
-            media_stream_constraints={"audio": True, "video": False},
+            media_stream_constraints={
+                "audio": {
+                    "sampleRate": 16000,  # Optimal for Whisper
+                    "channelCount": 1,    # Mono audio
+                    "echoCancellation": True,
+                    "noiseSuppression": True,
+                    "autoGainControl": True,
+                },
+                "video": False
+            },
             audio_processor_factory=AudioProcessor,
+            rtc_configuration=rtc_configuration,
             async_processing=True,
         )
 
-        # Show connection status
+        # Show detailed connection status
         if ctx.state.playing:
             st.success("🟢 Microphone connected and recording!")
         elif ctx.state.signalling:
-            st.info("🟡 Connecting to microphone...")
+            st.warning("🟡 Establishing connection... Please wait.")
         else:
-            st.info("🔴 Click START to connect microphone")
+            st.info("🔴 Click 'START' above to connect microphone")
 
-        # Control buttons and transcription
-        col1, col2 = st.columns(2)
+        # Recording control buttons
+        if ctx.audio_processor:
+            col1, col2 = st.columns(2)
 
-        with col1:
-            if st.button("🎙️ Start Recording") and ctx.audio_processor:
-                ctx.audio_processor.start_recording()
-                st.session_state.recording_complete = False
-                st.rerun()
+            with col1:
+                if st.button("🎙️ Start Recording", disabled=st.session_state.recording_active):
+                    ctx.audio_processor.start_recording()
+                    st.rerun()
 
-        with col2:
-            if st.button("⏹️ Stop Recording") and ctx.audio_processor:
-                frames = ctx.audio_processor.stop_recording()
-                if frames:
-                    st.session_state.audio_data = np.concatenate(
-                        frames, axis=0)
-                    st.session_state.recording_complete = True
-                st.rerun()
+            with col2:
+                if st.button("⏹️ Stop Recording", disabled=not st.session_state.recording_active):
+                    ctx.audio_processor.stop_recording()
+                    st.rerun()
 
-        # Show recording status
-        if ctx.audio_processor and ctx.audio_processor.is_recording:
-            st.warning(
-                "🎙️ Recording in progress... Click 'Stop Recording' when done.")
+            # Show current recording status
+            if st.session_state.recording_active:
+                st.warning(
+                    "🎙️ **Recording in progress...** Speak now, then click 'Stop Recording' when done.")
+                # Show a simple audio level indicator
+                st.progress(50, text="🔴 Recording...")
 
-        # Transcribe button appears after recording is complete
-        if st.session_state.recording_complete and st.session_state.audio_data is not None:
-            st.success("✅ Recording complete! Ready to transcribe.")
+            # Show transcribe button only when we have audio data
+            if st.session_state.has_audio_data and not st.session_state.recording_active:
+                st.success(
+                    "✅ **Recording complete!** Click below to transcribe.")
 
-            if st.button("📝 Transcribe Recorded Audio", type="primary"):
-                with st.spinner("🔁 Processing audio..."):
-                    try:
-                        # Save audio to temporary file
-                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-                            sf.write(tmp_file.name,
-                                     st.session_state.audio_data, 16000)
+                if st.button("📝 Transcribe Recorded Audio", type="primary"):
+                    if st.session_state.audio_frames:
+                        with st.spinner("🔁 Processing audio... Please wait."):
+                            try:
+                                # Combine all audio frames
+                                audio_data = np.concatenate(
+                                    st.session_state.audio_frames, axis=0)
 
-                            result = model.transcribe(
-                                tmp_file.name, fp16=False)
+                                # Save to temporary file
+                                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                                    import soundfile as sf
+                                    sf.write(tmp_file.name, audio_data, 16000)
 
-                            st.success("✅ Transcription complete!")
-                            st.text_area("📝 Transcribed Text",
-                                         result["text"], height=200)
+                                    # Transcribe
+                                    result = model.transcribe(
+                                        tmp_file.name, fp16=False)
 
-                            with st.expander("📊 Additional Information"):
-                                st.write(
-                                    f"**Language detected:** {result.get('language', 'Unknown')}")
-                                if 'segments' in result:
-                                    st.write(
-                                        f"**Number of segments:** {len(result['segments'])}")
+                                    # Display results
+                                    st.success("✅ Transcription complete!")
+                                    st.subheader("📝 Transcribed Text")
+                                    st.text_area(
+                                        "", result["text"], height=200, label_visibility="collapsed")
 
-                            # Reset for next recording
-                            st.session_state.audio_data = None
-                            st.session_state.recording_complete = False
+                                    # Additional info
+                                    with st.expander("📊 Additional Information"):
+                                        st.write(
+                                            f"**Language detected:** {result.get('language', 'Unknown')}")
+                                        if 'segments' in result:
+                                            st.write(
+                                                f"**Number of segments:** {len(result['segments'])}")
+                                            duration = result['segments'][-1].get(
+                                                'end', 0) if result['segments'] else 0
+                                            st.write(
+                                                f"**Duration:** {duration:.1f} seconds")
 
-                    except Exception as e:
-                        st.error(f"Error during transcription: {str(e)}")
+                                    # Reset for next recording
+                                    st.session_state.has_audio_data = False
+                                    st.session_state.audio_frames = []
 
-                    finally:
-                        try:
-                            os.unlink(tmp_file.name)
-                        except:
-                            pass
+                            except Exception as e:
+                                st.error(
+                                    f"❌ Error during transcription: {str(e)}")
+                                st.info(
+                                    "Try recording again or use the file upload method.")
+
+                            finally:
+                                try:
+                                    os.unlink(tmp_file.name)
+                                except:
+                                    pass
+                    else:
+                        st.error("No audio data found. Please record again.")
+                        st.session_state.has_audio_data = False
+
+        else:
+            st.info("Waiting for WebRTC connection... Click 'START' above first.")
 
     except Exception as e:
-        st.error(f"WebRTC error: {e}")
-        st.info("Please try refreshing the page or use the file upload method.")
+        st.error(f"WebRTC Configuration Error: {e}")
+        st.info("Try refreshing the page or use the File Upload method instead.")
+
+elif mode == "Simple Audio Recorder":
+    st.header("🎙️ Browser Audio Recorder")
+    st.info("This uses your browser's built-in audio recording capability.")
+
+    # HTML5 Audio Recorder
+    audio_recorder_html = """
+    <div id="audio-recorder">
+        <button id="startBtn" onclick="startRecording()">🎙️ Start Recording</button>
+        <button id="stopBtn" onclick="stopRecording()" disabled>⏹️ Stop Recording</button>
+        <audio id="audioPlayback" controls style="display:none; margin-top:10px;"></audio>
+        <p id="status">Click 'Start Recording' to begin</p>
+    </div>
+
+    <script>
+    let mediaRecorder;
+    let recordedChunks = [];
+
+    async function startRecording() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+            
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: 'audio/wav' });
+                const audioURL = URL.createObjectURL(blob);
+                document.getElementById('audioPlayback').src = audioURL;
+                document.getElementById('audioPlayback').style.display = 'block';
+                document.getElementById('status').innerText = 'Recording complete! Right-click the audio player and save the file.';
+            };
+            
+            recordedChunks = [];
+            mediaRecorder.start();
+            
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('status').innerText = '🔴 Recording... Click Stop when done.';
+            
+        } catch (err) {
+            document.getElementById('status').innerText = 'Error accessing microphone: ' + err.message;
+        }
+    }
+
+    function stopRecording() {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        }
+        
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('stopBtn').disabled = true;
+    }
+    </script>
+    """
+
+    st.components.v1.html(audio_recorder_html, height=200)
+    st.markdown("""
+    **Instructions:**
+    1. Click 'Start Recording' and allow microphone access
+    2. Speak clearly into your microphone
+    3. Click 'Stop Recording' when done
+    4. Right-click the audio player and select 'Save audio as...'
+    5. Upload the saved file using the File Upload method above
+    """)
 
 else:
     st.error("WebRTC not available. Please use file upload method.")
 
 # Instructions
-with st.expander("📖 Instructions"):
+with st.expander("📖 Troubleshooting WebRTC Issues"):
     st.markdown("""
-    ### Microphone Method:
-    1. Click 'START' to connect your microphone
-    2. Click '🎙️ Start Recording' to begin
-    3. Speak clearly into your microphone
-    4. Click '⏹️ Stop Recording' when done
-    5. Click '📝 Transcribe' to convert speech to text
+    **If WebRTC connection fails:**
     
-    ### File Upload Method:
-    1. Record audio using your device's recorder
-    2. Upload the audio file
-    3. Click "Transcribe" to convert speech to text
+    1. **Try different browsers:** Chrome usually works best
+    2. **Check firewall/antivirus:** May block WebRTC connections
+    3. **Corporate networks:** Often block WebRTC traffic
+    4. **Use File Upload instead:** Most reliable method
+    5. **Try Simple Audio Recorder:** Uses browser's native recording
     
-    ### Tips:
-    - Speak clearly and at normal volume
-    - Minimize background noise
-    - Use a quiet environment for best results
+    **Network requirements for WebRTC:**
+    - STUN servers must be accessible (stun.l.google.com:19302)
+    - UDP traffic on various ports
+    - Some corporate firewalls block this entirely
     """)
 
 # System info
@@ -231,5 +354,3 @@ with st.expander("🔧 System Information"):
     st.write(f"**Whisper Available:** {'✅' if WHISPER_AVAILABLE else '❌'}")
     st.write(f"**WebRTC Available:** {'✅' if WEBRTC_AVAILABLE else '❌'}")
     st.write(f"**Model Loaded:** {'✅' if model else '❌'}")
-    if 'ctx' in locals():
-        st.write(f"**Microphone Status:** {ctx.state}")
